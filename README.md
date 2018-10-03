@@ -230,8 +230,12 @@ User.create(fullname: "tky tky")
 Article.create(title: "tky tky")
 
 class User
+  include Her::Model
+  parse_root_in_json true
 end
 class Article
+  include Her::Model
+  parse_root_in_json :post
 end
 user = User.create(fullname: "")
 user.fullname
@@ -246,46 +250,68 @@ user = Users.find(1)
 users = Users.all
 ```
 ```
-{ "": {
-  "": "",
-  "": "",
-  "": {
-    "": "",
-    "": "",
+{ "data": {
+  "type": "developers",
+  "id": "xxxxxxxxxxxxx",
+  "attributes": {
+    "language": "ruby",
+    "name": "avdi grimm",
   }
 }
 }
 
 class Contributor
+  include Her::JsonApi::Model
+  type :developers
 end
 
 Her::API.setup url: 'https://my_awesome_json_api_service' do |c|
+  c.use FaradayMiddleware::EncodeJson
+  c.use Her::Middleware::JsonApiParser
+  c.use Faraday::Adapter::NetHttp
 end
 
 class User
+  include Her::Model
+  custom_get :pupular, :unpopular
+  custom_post :from_default
 end
 User.popular
 User.unpopular
 User.from_default(name: "")
 
 class User
+  include Her::Model
 end
 User.get(:popular)
 User.get(:single_best)
 
 class User
+  include Her::Model
+  def self.total
+    get_raw(:stats) do |parsed_data, response|
+      parsed_data[:data][:total_users]
+    end
+  end
 end
 User.total
 
 class User
+  include Her::Model
 end
 User.get("/users/popular")
+# GET /users/popular
+# => [#<User id=1>, #<User id=2>]
 
 class User
+  include Her::Model
+  collection_path "/hello_users/:id"
 end
 @user = User.find(1)
 
 class User
+  include Her::Model
+  collection_path "/organizations/:organization_id/users"
 end
 @user = User.find(1, _organization_id: 2)
 @user = User.all(_organization_id: 2)
@@ -294,58 +320,113 @@ end
 
 class User
 end
-user = User.find()
+user = User.find("xxxxxxxxxxxx")
+# GET /users/xxxxxxxxxxxxxxxx response { _id: xxxxxxxxxxxx, name: tky }
 user.destroy
+# DELETE /users/xxxxxxxxxxxxxxxx
 
 module MyAPI
+  class Model
+    include Her::Model
+    parse_root_in_json true
+    include_root_in_json true
+  end
 end
 class User < MyAPI::Model
 end
 User.find(1)
+# GET /users/1
 
 class User
+  include Her::Model
+  scope :by_role, ->(role) { where(role: role ) }
+  scope :admins, -> { by_role('admin') }
+  scope :active, -> { where(active: 1) }
 end
 @admins = User.admins
-@moderators = User.by_role()
+# GET /users?role=admin
+@moderators = User.by_role('moderator')
+# GET /users?role=moderator
 @active_admins = User.active.admins
+# GET /users?role=admin&active=1
 
 class User
+  include Her::Model
+  collection_path "organizations/:organization_id/users"
+  scope :for_organization, ->(id) { where(organization_id: id) }
 end
-@user = User.for_organization().find()
-@user = User.for_organization().create()
+@user = User.for_organization(3).find(2)
+# GET /organizations/3/users/2
+@user = User.for_organization(3).create(fullname: "tky tky")
+# POST /organizations/3 fullname=tky+tky
 
 # config/initializers/her.rb
 MY_API = Her::API.new
-MY_API.setup url: "" do |c|
+MY_API.setup url: "https://my-api.ex.com" do |c|
+  c.use Her::Middleware::DefaultParseJSON
+  c.use Faraday::Adapter::NetHttp
 end
 OTHER_API = HER::API.new
-OTHER_API.setup url: "" do ||
+OTHER_API.setup url: "https://other-api.ex.com" do |c|
+  c.use Her::Middleware::DefaultParseJSON
+  c.use Faraday::Adapter::NetHttp
 end
 
 class User
+  include Her::Model
+  use_api MY_API
 end
 class Category
+  include Her::Model
+  use_api OTHER_API
 end
 User.all
+# GET https://my-api.ex.com/users
 Category.all
+# GET https://other-api.ex.com/categories
 
-ssl_option = {}
-Her::API.setup url: "", ssl:ssl_options do ||
+ssl_option = { ca_path: "/usr/lib/ssl/certs" }
+Her::API.setup url: "https://api.ex.com", ssl:ssl_options do |c|
+  c.use Her::Middleware::DefaultParseJSON
+  c.use Faraday::Adapter::NetHttp
 end
 
 # app/models/user.rb
 class User
+  include Her::Model
+  custom_get :popular
 end
 # app/models/post.rb
 class Post
+  include Her::Model
+  custom_get :recent, :archived
 end
 
 # spec/spec_helper.rb
 RSpec.configure do |config|
+  config.include(Module.new do
+    def stub_api_for(klass)
+      klass.use_api (api = Her::API.new)
+      api.setup url: "http://api.ex.com" do |c|
+        c.use Her::Middleware::FirstLevelParseJSON
+        c.adapter(:test) { |s| yield(s) }
+      end
+    end
+  end)
 end
 
 # spec/models/user.rb
 describe User do
+  before do
+    stub_api_for(User) do |stub|
+      stub.get("/users/popular") { |env| [200, {}, [{ id: 1, name: "tky tky" }, { id: 2, name: "tky tky"}].to_json] }
+    end
+  end
+  describe :popular do
+    subject { User.popular }
+    its(:length) { should == 2 }
+    its(:errors) { should be_empty }
+  end
 end
 
 # spec/models/user.rb
@@ -353,10 +434,10 @@ descirbe Post do
   descirbe :recent do
     before do
       stub_api_for(Post) do |stub|
-        stub.get("/posts/recent") { |env| [200, {}, [{}, {}].to_json] }
+        stub.get("/posts/recent") { |env| [200, {}, [{ id: 1 }, { id: 2 }].to_json] }
       end
       subject { Post.recent }
-      its(:length) { should == 2}
+      its(:length) { should == 2 }
       its(:errors) { should be_empty }
     end
   end
